@@ -6,8 +6,8 @@
 # The intended use case is sampling trace data from exploratory scenarios with variable computing costs across the scenarios. 
 #
 # # TODO:
-# (1) This is bascially sampling around the mean, the % below a threshold per simulation_simulation() should be calculated and each simulation_simulation() time should be included as the cost constraint (not time per year)
-# (2) General testing. Compare actual results to theoretical (difference could be easily be initial sampling if its not large).
+# (1) Some shortcuts and wierdness in the threshold calculations and allocation of traces versus samples.
+# (2) General checking and testing needs to be done, there could be errors (even fundemental ones). Compare actual results to theoretical (difference could be easily be initial sampling if its not large).
 # (3) How does this translate in a multi-objective problem. Might want to deal with each threshold indepenently (but then what to do with time constraint). 
 #
 
@@ -53,15 +53,15 @@ for i in range(len(mu)):
 # %%[markdown]
 # ## Example set up
 # c_o: fixed cost = 0 seconds
-# N: sample size = 8 strata (i.e. scenarios) containing 100 traces of 100 years each (i.e. 10,000 years per scenario) or 80,000 years. *Note: its assumed that one performance measurement produced each year.
-# strata_n: strata size = an assumed equal number of elements per strata (i.e. $\frac{N}{8} = 10,000$years) per strata.
-# c: strata (computational) cost = it is assumed that even numbered strata take 0.01 seconds *per year* (or 1 seconds per trace or simulation) to run, odd numbered stata take double that time: 0.02 seconds per year (or 2 seconds per trace) to run. *Note*, the simulation runs 100 years (1 trace = 100 years) at a time.
+# N: sample size = 8 strata (i.e. scenarios) containing 100 traces. Each trace contains 100 years produces 100 metrics of interest, so N = 80,000. 
+# strata_n: strata size = there is an equal number of traces per strata (i.e. $\frac{N}{8} = 100$metric observations) per strata.
+# c: strata (computational) cost = it is assumed that even numbered strata take 0.01 seconds per trace (or simulation) to run, odd numbered stata take double that time: 0.2 seconds per trace to run. *Note*, the simulation runs 100 years (1 trace = 100 years) at a time.
 # budget = 100 seconds. 
-# n: total sample size (in yrs) = the sample size, $n \in [5,000, 10,000]$ (i.e. $n_{min} = 5,000 = \frac{100}{0.02}$ [s/(s/yr)] and $n_{max} = 10,000 = \frac{100}{0.01}$ [s/(s/yr)]).
+# n: total sample size (years to run) = the sample size, $n \in [5,000, 10,000]$ (i.e. $n_{min} = 5,000 = \frac{100}{1}\frac{1}{0.2}\frac{100}{1}$ [s(trace/s)(yr/trace)] and $n_{max} = 10,000 = \frac{100}{1}\frac{1}{0.1}\frac{100}{1}$ [s/(trace/s)(yr/trace)]).
 # %%
 c_o = 0
-N = 8 * 100 * 100 
-strata_N, c = [N/8 for i in range(len(strata))], [0.01 if i % 2 else 0.02 for i in range(len(strata))]
+N = 8 * 100 
+strata_N, c = [N/8 for i in range(len(strata))], [0.1 if i % 2 else 0.2 for i in range(len(strata))]
 total_cost = c_o + sum([c[h] * strata_N[h] for h in range(len(strata))])
 
 # %%[markdown]
@@ -71,46 +71,73 @@ total_cost = c_o + sum([c[h] * strata_N[h] for h in range(len(strata))])
 def simulation_simulation(h: int, strata: typing.List = strata, c: typing.List[float] = c) -> typing.List:
     start = time.time()
     x = strata[h].rvs(size=100)
-    time.sleep(c[h] * 100 - (time.time() - start))
+    time.sleep(c[h] - (time.time() - start))
     return x.tolist()
 
 # %% [markdown]
 # ## Wrappper Example
 #
 # %%
-def target_n(data: typing.List[typing.List[float]], budget: float, init_cost: float = c_o,
-             cost: typing.List[float] = c, strata_count: typing.List[int] = strata_N) -> typing.List[int]:
-    n = []
-    for h in range(len(data)):
-        num = (budget - init_cost) * strata_count[h] * np.std(data[h]) / np.sqrt(cost[h])
-        den = sum([strata_count[h] * np.std(data[h]) * np.sqrt(cost[h]) for h in range(len(data))])
-        n.append(num / den)
-    return n
+class Wrapper:
+    def __init__(self, strata: typing.List, budget: float, metric_threshold: float, 
+                 count_strata: typing.List[int] = strata_N, updates: int = 10,
+                 cost_init: float = c_o, cost_strata: typing.List[float] = c):
+        self.budget = budget
+        self.strata = strata
+        self.strata_N = count_strata
+        self.updates = updates
+        self.cost_init = cost_init
+        self.cost_strata = cost_strata
+        self.cost_total = self.total_cost()
+        self.threshold = metric_threshold
     
-def pieinsky_allocation(sim: typing.Callable, strata: typing.List, budget: float) -> typing.List[typing.List[float]]:
-    x = [sim(h, strata) for h in range(len(strata))] 
-    n = target_n(x, budget)
-    for h in range(len(strata)):
-        print(f'strata {h}: {n[h]} samples needed')
-        while len(x[h]) < n[h]:
-            x[h] = x[h] + sim(h, strata)
-            print(f'--strata {h}: {len(x[h])} samples collected')
-    return x
+    def total_cost(self):
+        '''
+        Computes the expected total compute time of sampling the entire population.
+        '''
+        return self.cost_init + sum([self.cost_strata[h] * self.strata_N[h] for h in range(len(self.strata))]) 
     
-    #x: typing.List[typing.List[float]] = []
-    # while tics < budget:
-    #     if tics == 0:
-    #         x = [sim(h, strata) for h in range(len(strata))]
-    #         # for h in range(len(strata)):
-    #         #     x.append(sim(h, strata))
-    #     else:
-    #         n = target_n(x)
-    #         for h in range(len(strata)):
-    #             i, n_traces = 0, np.ceil((n[h] - len(x[h])) / 100)
-    #             while i < n_traces:
-    #                 x[h] += sim(h, strata)
-    # return x
+    def failures(self, sample: typing.List[float]) -> typing.List[int]:
+        '''
+        Replaces strata_metrics with 1s where threshold < strata_metric and 0s where threshold >= strata_metric. 
+        '''
+        # assumes below threshold is failure above threshold is success
+        return [1 if i < self.threshold else 0 for i in sample]
+    
+    def allocate(self, samples: typing.List[typing.List[float]], budget: float) -> typing.List[int]:
+        '''
+        Returns a list of integers representing the optimal allocation of the sample based on a fixed maximum sampling cost.
+        '''
+        def n_h(h) -> float:
+            return ((budget - self.cost_init) * self.strata_N[h] * np.std(self.failures(samples[h])) / np.sqrt(self.cost_strata[h])) / sum([self.strata_N[i] * np.std(self.failures(samples[i])) for i in range(len(self.strata))]) 
+        return [np.ceil(n_h(h)) for h in range(len(self.strata))]
+    
+    def pieinsky(self, simulation: typing.Callable):
+        '''
+        Samples from the strata based on optimal allocation with variable cost.
+        '''
+        clock, start, updates = 0, time.time(), self.updates
+        print(f'{updates} updates remaining.')
+        samples = [simulation(h, self.strata) for h in range(len(self.strata))]
+        clock += time.time() - start
+        print(f'--initial sample retreived in {clock} seconds.')
+        updates -= 1
+        allocation = self.allocate(samples, (self.budget - clock) / updates)
+        
+        while updates > 0:
+            print(f'{updates} updates remaining, {int(self.budget - clock)} seconds remaining.')
+            start = time.time()
+            for h in range(len(allocation)):
+                if len(samples[h]) < int(allocation[h] * 100):
+                    print(f'strata {h}: contains {len(samples[h])} of {int(allocation[h] * 100)} samples needed.')
+                    while len(samples[h]) < allocation[h] * 100:
+                        samples[h] += simulation(h, strata)
+                        print(f'--{len(samples[h])} samples retreived.') 
+            clock += time.time() - start
+            allocation = self.allocate(samples, (self.budget - clock) / updates)
+            updates -= 1
+        return samples
         
 # %%
-budget = 100
-samples = pieinsky_allocation(sim=simulation_simulation, strata=strata, budget=budget)
+wrapper = Wrapper(strata, budget = 100, metric_threshold = 0.10)
+x = wrapper.pieinsky(simulation_simulation)
